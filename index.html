@@ -1701,9 +1701,33 @@ function estadoObjetivosVisibles(emp, mesActualParam){
       const esTrazabilidad = /trazabilidad/i.test(o.texto);
       const esSinader = /sinader/i.test(o.texto);
       const esOperacionUnitaria = /operaciones? en forma unitaria/i.test(o.texto);
+      const esValorizacionPct = /valorizar\s+(un\s+)?\d+%/i.test(o.texto);
 
       let avance, metaNum, detalle, ambito, ok;
-      if (esTrazabilidad) {
+      if (esValorizacionPct) {
+        // El backend normaliza esto a avance/meta=100 (0-100, "% de la meta
+        // ya alcanzado") para que la barra de progreso funcione igual que
+        // el resto de los objetivos — pero eso esconde los números reales
+        // (ej. "100%" cuando en realidad es "35% acumulado vs. 2% meta").
+        // Se recalcula en vivo igual que renderValorizacion() (mismo
+        // VAL_DATA/getMetaMes) para mostrar Real/Acumulado/Meta de verdad.
+        const vd = VAL_DATA[emp.id] || {};
+        const pActual = esFuturo(mesActualParam) ? null : (vd.meses?.[mesActualParam] ?? null);
+        const metaReal = getMetaMes(emp.id, mesActualParam);
+        const mesesHasta = MESES.slice(0, MESES.indexOf(mesActualParam) + 1);
+        const acumDisp = mesesHasta.filter(m => vd.acumulado?.[m] != null);
+        const ultimoMesAcum = acumDisp[acumDisp.length - 1];
+        const acumReal = ultimoMesAcum !== undefined ? vd.acumulado[ultimoMesAcum] : null;
+        avance = acumReal;
+        metaNum = metaReal ?? 100;
+        const partesDet = [];
+        if (pActual !== null) partesDet.push('Real ' + mesActualParam + ': ' + pActual + '%');
+        if (acumReal !== null) partesDet.push('Acumulado' + (ultimoMesAcum ? ' a ' + ultimoMesAcum : '') + ': ' + acumReal + '%');
+        partesDet.push(metaReal !== null ? ('Meta: ' + metaReal + '%') : 'Sin meta definida');
+        detalle = partesDet.join(' · ');
+        ambito = emp.sucursal || "esta obra";
+        ok = (acumReal !== null && metaReal !== null) ? acumReal >= metaReal : false;
+      } else if (esTrazabilidad) {
         // Trazabilidad de ESTA obra puntual, Enero → mes seleccionado.
         // (pctTrazabilidadEmpresaTotal_ sumaría TODAS las sucursales de
         // Vital juntas, lo que diluye los problemas de una obra puntual —
@@ -2332,14 +2356,31 @@ function imprimirInformeCompleto(){
       +'</tr></thead><tbody>'
       +emp.objetivos.map((o,i)=>{
         const esTraz=/trazabilidad/i.test(o.texto);
-        const av=esTraz?pctTrazabilidadAnual(emp):o.avance??0;
-        const mt=o.meta??100;
-        const ok=av>=mt;
+        const esValPct=/valorizar\s+(un\s+)?\d+%/i.test(o.texto);
+        let av, mt, sinDatoPdf=false;
+        if(esTraz){
+          av = pctTrazabilidadAnual(emp); mt = 100;
+        } else if(esValPct){
+          // Mismos números reales que en pantalla (estadoObjetivosVisibles):
+          // Acumulado real vs. Meta real, no el 0-100 normalizado que manda
+          // el backend en o.avance/o.meta.
+          const vd = VAL_DATA[emp.id] || {};
+          const metaReal = getMetaMes(emp.id, mesActual);
+          const mesesHasta = MESES.slice(0, MESES.indexOf(mesActual) + 1);
+          const acumDisp = mesesHasta.filter(m => vd.acumulado?.[m] != null);
+          const ultimoMesAcum = acumDisp[acumDisp.length - 1];
+          av = ultimoMesAcum !== undefined ? vd.acumulado[ultimoMesAcum] : null;
+          mt = metaReal;
+          sinDatoPdf = av===null || mt===null;
+        } else {
+          av = o.avance??0; mt = o.meta??100;
+        }
+        const ok = sinDatoPdf ? false : av>=mt;
         return '<tr class="'+(i%2?'even':'')+'">'
           +'<td style="padding:5px 8px;border-bottom:1px solid #F2F4F7;font-weight:500;">'+o.texto+'</td>'
-          +'<td style="padding:5px;text-align:center;border-bottom:1px solid #F2F4F7;">'+mt+'%</td>'
-          +'<td style="padding:5px;text-align:center;border-bottom:1px solid #F2F4F7;font-weight:700;color:'+colorPct(av)+'">'+av+'%</td>'
-          +'<td style="padding:5px;text-align:center;border-bottom:1px solid #F2F4F7;color:'+(ok?'#039855':'#F04438')+';font-weight:700;">'+(ok?'✓ Cumplido':'✗ Pendiente')+'</td>'
+          +'<td style="padding:5px;text-align:center;border-bottom:1px solid #F2F4F7;">'+(sinDatoPdf&&mt===null?'—':mt+'%')+'</td>'
+          +'<td style="padding:5px;text-align:center;border-bottom:1px solid #F2F4F7;font-weight:700;color:'+(sinDatoPdf?'#98A2B3':colorPct(av))+'">'+(sinDatoPdf&&av===null?'—':av+'%')+'</td>'
+          +'<td style="padding:5px;text-align:center;border-bottom:1px solid #F2F4F7;color:'+(sinDatoPdf?'#98A2B3':ok?'#039855':'#F04438')+';font-weight:700;">'+(sinDatoPdf?'— Sin dato':ok?'✓ Cumplido':'✗ Pendiente')+'</td>'
           +'</tr>';
       }).join('')
       +'</tbody></table>';
