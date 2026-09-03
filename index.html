@@ -126,6 +126,8 @@ tr:hover td{background:var(--g25);}
 .cse-month{display:flex;flex-direction:column;align-items:center;gap:2px;}
 .cse-month-name{font-size:9px;color:var(--tx2);font-weight:600;}
 .cse-dot{width:20px;height:20px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;}
+.cse-dot.editable{cursor:pointer;transition:transform .1s;}
+.cse-dot.editable:hover{transform:scale(1.15);box-shadow:0 0 0 2px var(--brand) inset;}
 .dot-ok{background:var(--ok-l);color:var(--ok);}
 .dot-no{background:var(--err-l);color:var(--err);}
 .dot-na{background:var(--g100);color:var(--g400);}
@@ -932,6 +934,73 @@ function dotCSE(v, mes){
   return `<div class="cse-dot dot-na">—</div>`;
 }
 
+// ---------- Seguimiento CSE editable (Correo / Reunión / Encuesta) ----------
+// Textos EXACTOS que espera leerCSE_() en Code-Vital.gs (mapAccion) — si no
+// coinciden letra por letra, el backend no reconoce la fila al releer.
+const CSE_ACCION_TXT = { correo: "Correo seguimiento", reunion: "Reunión seguimiento", encuesta: "Encuesta seguimiento" };
+let cseDirtyEmpIds = new Set();
+let cseAutoSaveTimer = null;
+const CSE_AUTOSAVE_DELAY_MS = 1500;
+
+function dotCSEEditable(emp, key, mes){
+  if(esFuturo(mes)) return '<div class="cse-dot dot-fut">·</div>';
+  const v = emp.cse[key][mes];
+  const cls = v===true ? "dot-ok" : v===false ? "dot-no" : "dot-na";
+  const txt = v===true ? "✓" : v===false ? "✗" : "—";
+  return '<div class="cse-dot editable '+cls+'" title="Click para cambiar" onclick="cseOnToggle(\''+emp.id+'\',\''+key+'\',\''+mes+'\')">'+txt+'</div>';
+}
+function cseOnToggle(empId, key, mes){
+  const emp = EMPRESAS.find(e => e.id===empId);
+  if(!emp) return;
+  const v = emp.cse[key][mes];
+  // vacío → SI → NO → vacío (deja volver a "sin dato" para corregir un click de más)
+  emp.cse[key][mes] = v===true ? false : v===false ? undefined : true;
+  cseDirtyEmpIds.add(empId);
+  clearTimeout(cseAutoSaveTimer);
+  cseAutoSaveTimer = setTimeout(cseSaveAll, CSE_AUTOSAVE_DELAY_MS);
+  renderMain();
+}
+async function cseSaveAll(){
+  const ids = Array.from(cseDirtyEmpIds);
+  cseDirtyEmpIds.clear();
+  if(!ids.length) return;
+  const filas = [];
+  ids.forEach(empId => {
+    const emp = EMPRESAS.find(e => e.id===empId);
+    if(!emp) return;
+    Object.keys(CSE_ACCION_TXT).forEach(key => {
+      // El backend escribe el valor tal cual en la celda — hay que mandar
+      // texto "SI"/"NO" (no boolean crudo, que Sheets guardaría como
+      // TRUE/FALSE y leerCSE_/normalizeSiNo_ no reconocería al releer).
+      const valoresTxt = {};
+      Object.keys(emp.cse[key]).forEach(mes => {
+        const v = emp.cse[key][mes];
+        valoresTxt[mes] = v===true ? "SI" : v===false ? "NO" : "";
+      });
+      filas.push({ empresaId: emp.id, sucursal: emp.sucursal, accion: CSE_ACCION_TXT[key], valores: valoresTxt });
+    });
+  });
+  const payload = { tipo: "cse", filas: filas };
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    const res = await fetch(DATA_SOURCE_URL, {
+      method:"POST", headers:{ "Content-Type":"text/plain;charset=utf-8" }, body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    const json = await res.json();
+    if (json.error || json.ok === false) throw new Error(json.error || "Error desconocido");
+    mnShowToast("Seguimiento CSE guardado.");
+  } catch(err){
+    console.error(err);
+    ids.forEach(id => cseDirtyEmpIds.add(id)); // reintenta más adelante, no se pierde el cambio
+    mnShowToast("No se pudo guardar el seguimiento CSE.", true);
+    clearTimeout(cseAutoSaveTimer);
+    cseAutoSaveTimer = setTimeout(cseSaveAll, CSE_AUTOSAVE_DELAY_MS * 4);
+  }
+}
+
 // ============================================================
 // PANEL FILTRO RESIDUOS — muestra todos los residuos del mes
 // y permite activar/desactivar cuáles se muestran en la tabla
@@ -1374,11 +1443,10 @@ function guardarPendiente(key){
 // modo: "mes" = solo mes actual | "anual" = todos los meses
 function renderCSE(emp, modo){
   modo = modo || "mes";
-  // Sin encuesta de seguimiento
-  const keys = [{key:"correo",lbl:"Correo de seguimiento"},{key:"reunion",lbl:"Reunión de seguimiento"}];
+  const keys = [{key:"correo",lbl:"Correo de seguimiento"},{key:"reunion",lbl:"Reunión de seguimiento"},{key:"encuesta",lbl:"Encuesta de seguimiento"}];
   const meses = MESES; // todos los meses Ene-Dic, futuros como ·
 
-  // % solo sobre correo y reunión
+  // % sobre las 3 acciones
   let ok=0, tot=0;
   MESES_ACTIVOS.filter(m=>!esFuturo(m)).forEach(m=>{
     keys.forEach(({key})=>{
@@ -1399,7 +1467,7 @@ function renderCSE(emp, modo){
       <div class="cse-header">
         <div>
           <div class="cse-title">Seguimiento CSE</div>
-          <div style="font-size:10px;color:var(--g600);margin-top:1px">Correos · Reuniones</div>
+          <div style="font-size:10px;color:var(--g600);margin-top:1px">Correos · Reuniones · Encuestas · click en un punto para editar</div>
         </div>
         <div style="text-align:right">
           <div class="cse-pct-big" style="color:${colorPct(pCse)}">${pCse}%</div>
@@ -1418,7 +1486,7 @@ function renderCSE(emp, modo){
             ${keys.map(({key,lbl},i)=>`
               <tr style="${i%2===0?'':'background:var(--g25)'}">
                 <td style="padding:8px 16px;font-size:11px;font-weight:700;color:var(--g700);white-space:nowrap;">${lbl}</td>
-                ${meses.map(m=>`<td style="text-align:center;padding:6px 4px;">${dotCSE(emp.cse[key][m],m)}</td>`).join("")}
+                ${meses.map(m=>`<td style="text-align:center;padding:6px 4px;">${dotCSEEditable(emp,key,m)}</td>`).join("")}
               </tr>`).join("")}
           </tbody>
         </table>
